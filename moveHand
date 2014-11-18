@@ -1,0 +1,317 @@
+#!/usr/bin/env python
+
+# Copyright (c) 2013-2014, Rethink Robotics
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+# 3. Neither the name of the Rethink Robotics nor the names of its
+#    contributors may be used to endorse or promote products derived from
+#    this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+"""
+MODIFIED Baxter RSDK Inverse Kinematics Example
+"""
+import argparse
+import struct
+import sys
+
+import rospy
+import math
+
+import baxter_interface
+
+from geometry_msgs.msg import (
+    PoseStamped,
+    Pose,
+    Point,
+    Quaternion,
+    Twist,
+    Wrench
+)
+
+
+from gazebo_msgs.msg import (
+    WorldState
+)
+
+from std_msgs.msg import Header
+
+from baxter_core_msgs.srv import (
+    SolvePositionIK,
+    SolvePositionIKRequest
+)
+
+from baxter_core_msgs.msg import (
+    EndpointState
+)
+
+# right input
+rightInputX = 0
+rightInputY = 0
+rightInputZ = 0
+
+rightInputXR = 0
+rightInputYR = 0
+rightInputZR = 0
+rightInputWR = 0
+
+# left input
+leftInputX = 0
+leftInputY = 0
+leftInputZ = 0
+
+leftInputXR = 0
+leftInputYR = 0
+leftInputZR = 0
+leftInputWR = 0
+
+exitNode = 0
+
+leftMsgReceived = 0
+rightMsgReceived = 0
+
+def ik_test(limb):
+    global rightInputX
+    global rightInputY
+    global rightInputZ
+    global rightInputXR
+    global rightInputYR
+    global rightInputZR
+    global rightInputWR
+
+    global leftInputX
+    global leftInputY
+    global leftInputZ
+    global leftInputXR
+    global leftInputYR
+    global leftInputZR
+    global leftInputWR
+
+    global exitNode
+
+    
+    ns = "ExternalTools/" + limb + "/PositionKinematicsNode/IKService"
+    iksvc = rospy.ServiceProxy(ns, SolvePositionIK)
+    ikreq = SolvePositionIKRequest()
+    hdr = Header(stamp=rospy.Time.now(), frame_id='base')
+
+    poses = {
+        'right': PoseStamped(
+            header=hdr,
+            pose=Pose(
+                position=Point(
+                    x=rightInputX,
+                    y=rightInputY,
+                    z=rightInputZ,
+                ),
+                orientation=Quaternion(
+                    x=rightInputXR,
+                    y=rightInputYR,
+                    z=rightInputZR,
+                    w=rightInputWR,
+                ),
+            ),
+        ),
+        'left': PoseStamped(
+            header=hdr,
+            pose=Pose(
+                position=Point(
+                    x=leftInputX,
+                    y=leftInputY,
+                    z=leftInputZ,
+                ),
+                orientation=Quaternion(
+                    x=leftInputXR,
+                    y=leftInputYR,
+                    z=leftInputZR,
+                    w=leftInputWR,
+                ),
+            ),
+        ),
+    }
+
+    ikreq.pose_stamp.append(poses[limb])
+    try:
+        rospy.wait_for_service(ns, 5.0)
+        resp = iksvc(ikreq)
+    except (rospy.ServiceException, rospy.ROSException), e:
+        rospy.logerr("Service call failed: %s" % (e,))
+        return 1
+
+    # Check if result valid, and type of seed ultimately used to get solution
+    # convert rospy's string representation of uint8[]'s to int's
+    resp_seeds = struct.unpack('<%dB' % len(resp.result_type),
+                               resp.result_type)
+    if (resp_seeds[0] != resp.RESULT_INVALID):
+        seed_str = {
+                    ikreq.SEED_USER: 'User Provided Seed',
+                    ikreq.SEED_CURRENT: 'Current Joint Angles',
+                    ikreq.SEED_NS_MAP: 'Nullspace Setpoints',
+                   }.get(resp_seeds[0], 'None')
+        print("SUCCESS - Valid Joint Solution Found from Seed Type: %s" %
+              (seed_str,))
+        # Format solution into Limb API-compatible dictionary
+        limb_joints = dict(zip(resp.joints[0].name, resp.joints[0].position))
+        print "\nIK Joint Solution:\n", limb_joints
+        print "------------------"
+        print "Response Message:\n", resp
+
+
+        # Move joints to calculated positions
+        print "moving limb..."
+        baxter_interface.Limb(limb).move_to_joint_positions(limb_joints)
+
+        if limb == 'right':
+            rightHandSub = rospy.Subscriber('/robot/limb/right/endpoint_state',
+                EndpointState, rightFK)
+        if limb == 'left':
+            leftHandSub = rospy.Subscriber('/robot/limb/left/endpoint_state',
+                EndpointState, leftFK)
+
+    else:
+        print("INVALID POSE - No Valid Joint Solution Found.")
+        exitNode = 1
+
+    return 0
+
+
+# Callbacks
+def leftSetGoalPose(msg):
+    global leftInputX
+    global leftInputY
+    global leftInputZ
+    global leftInputXR
+    global leftInputYR
+    global leftInputZR
+    global leftInputWR
+    global leftMsgReceived
+
+    leftMsgReceived += 1
+
+    leftInputX = msg.pose.position.x
+    leftInputY = msg.pose.position.y
+    leftInputZ = msg.pose.position.z
+
+    leftInputXR = msg.pose.orientation.x
+    leftInputYR = msg.pose.orientation.y
+    leftInputZR = msg.pose.orientation.z
+    leftInputWR = msg.pose.orientation.w
+
+    if leftMsgReceived == 1:
+        return ik_test('left')
+
+
+def rightSetGoalPose(msg):
+    global rightInputX
+    global rightInputY
+    global rightInputZ
+    global rightInputXR
+    global rightInputYR
+    global rightInputZR
+    global rightInputWR
+    global rightMsgReceived
+
+    rightMsgReceived += 1
+
+    rightInputX = msg.pose.position.x
+    rightInputY = msg.pose.position.y
+    rightInputZ = msg.pose.position.z
+
+    rightInputXR = msg.pose.orientation.x
+    rightInputYR = msg.pose.orientation.y
+    rightInputZR = msg.pose.orientation.z
+    rightInputWR = msg.pose.orientation.w
+
+    if rightMsgReceived == 1:
+        return ik_test('right')
+
+
+# calculate position error from forward kinematics
+def rightFK(msg):
+    global rightInputX
+    global rightInputY
+    global rightInputZ
+    global rightInputXR
+    global rightInputYR
+    global rightInputZR
+    global rightInputWR
+    global exitNode
+    
+    rightPose = msg.pose
+    rightTwist = msg.twist
+    rightWrench = msg.wrench
+
+    rightDeltaX = rightInputX - rightPose.position.x
+    rightDeltaY = rightInputY - rightPose.position.y
+    rightDeltaZ = rightInputZ - rightPose.position.z
+    rightPosError = math.sqrt((rightDeltaX**2)+(rightDeltaY**2)+(rightDeltaZ**2))
+    print "rightDeltaX: ", rightDeltaX
+    print "rightDeltaY: ", rightDeltaY
+    print "rightDeltaZ: ", rightDeltaZ
+    print "rightPositionError: ", rightPosError
+
+    #if rightPosError < 0.1:
+    exitNode = 1
+
+
+def leftFK(msg):
+    global leftInputX
+    global leftInputY
+    global leftInputZ
+    global leftInputXR
+    global leftInputYR
+    global leftInputZR
+    global leftInputWR
+    global exitNode
+
+    leftPose = msg.pose
+    leftTwist = msg.twist
+    leftWrench = msg.wrench
+    leftDeltaX = leftInputX - leftPose.position.x
+    leftDeltaY = leftInputY - leftPose.position.y
+    leftDeltaZ = leftInputZ - leftPose.position.z
+    leftPosError = math.sqrt((leftDeltaX**2)+(leftDeltaY**2)+(leftDeltaZ**2))
+    print "leftDeltaX: ", leftDeltaX
+    print "leftDeltaY: ", leftDeltaY
+    print "leftDeltaZ: ", leftDeltaZ
+    print "leftPositionError: ", leftPosError
+
+    exitNode = 1
+
+def main():
+    global exitNode
+    rospy.init_node("ik_goal_subscriber")
+    # when a new pose for either limb is published by another node,
+    # callback functions set pose and run ik   
+    rightHandSub = rospy.Subscriber('/rightHandGoal', PoseStamped, rightSetGoalPose)
+    leftHandSub = rospy.Subscriber('/leftHandGoal', PoseStamped, leftSetGoalPose)
+    
+    while exitNode == 0:
+        #meaningless action
+        x = 0
+    return 0
+
+if __name__ == '__main__':
+    #main()
+    #rospy.spin()
+
+    sys.exit(main())
