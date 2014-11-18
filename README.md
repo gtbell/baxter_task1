@@ -1,4 +1,4 @@
 baxter_task1
 ============
 
-Your code for Task 1. Fork this repository to write your solution to the task.
+Nodes can be launched in either order. Change goal poses by editing declarations at beginning of  node.
